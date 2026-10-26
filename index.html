@@ -1,1 +1,472 @@
 
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Family Grocery Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+body{font:16px Arial,sans-serif;background:#f3f7f4;color:#18392c;margin:0}
+header{background:#176b55;color:white;padding:20px}
+main{max-width:900px;margin:20px auto;padding:0 14px}
+.card{background:white;padding:18px;margin-bottom:15px;border-radius:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+label{display:block;margin:10px 0 5px;font-weight:bold}
+input,select,button{box-sizing:border-box;font:inherit;padding:10px;border-radius:6px;border:1px solid #ccc}
+input,select{width:100%}
+button{background:#176b55;color:white;border:0;margin:8px 5px 5px 0;cursor:pointer}
+.secondary{background:#e3eee7;color:#174b39}
+.danger{background:#a22;color:white}
+.muted{color:#66776c;font-size:14px}
+.hidden{display:none!important}
+.notice{padding:12px;background:#fff0c9;border-radius:8px;margin-bottom:12px}
+.entry{border:1px solid #d6e2d9;border-radius:8px;padding:12px;margin:10px 0}
+.stats{display:flex;gap:10px;flex-wrap:wrap}
+.stats div{background:#eaf4ed;padding:12px;border-radius:8px;flex:1;min-width:120px}
+</style>
+</head>
+<body>
+<header>
+<h2>🛒 Family Monthly Grocery Tracker</h2>
+Track grocery spending together with your family.
+</header>
+<main>
+<div id="notice" class="notice hidden"></div>
+
+<section id="auth" class="card">
+<h3>Login / Create Account</h3>
+<label>Email</label><input id="email" type="email" autocomplete="email">
+<label>Password</label><input id="password" type="password" autocomplete="current-password">
+<button id="signin">Sign In</button>
+<button id="signup" class="secondary">Create Account</button>
+</section>
+
+<section id="setup" class="card hidden">
+<h3>Set Up Your Family</h3>
+<label>Household name</label><input id="houseName" value="Our Family">
+<button id="createHouse">Create Household</button>
+<hr>
+<label>Invite code from your spouse</label><input id="inviteCode">
+<button id="joinHouse" class="secondary">Join Household</button>
+<p class="muted">Both accounts must use the same household to share records.</p>
+</section>
+
+<section id="app" class="hidden">
+<div class="card">
+<button id="signout" class="secondary">Sign Out</button>
+<h3 id="houseTitle">Our Family</h3>
+<p id="emailLabel" class="muted"></p>
+<button id="invite">Generate Spouse Invite</button>
+<button id="copy" class="secondary hidden">Copy Invite</button>
+<p id="inviteText"></p>
+</div>
+
+<div class="card">
+<h3 id="formTitle">Add Grocery Purchase</h3>
+<form id="purchaseForm">
+<input id="editId" type="hidden">
+<div class="grid">
+<div><label>Date</label><input id="date" type="date" required></div>
+<div><label>Item name</label><input id="item" required maxlength="120" placeholder="Rice, milk, vegetables"></div>
+<div><label>Quantity</label><input id="qty" type="number" min="0.001" step="any" value="1" required></div>
+<div><label>Unit</label>
+<select id="unit">
+<option>kg</option><option>g</option><option>litre</option><option>ml</option><option>pack</option><option>piece</option><option>dozen</option><option>other</option>
+</select></div>
+<div><label>Price before GST (₹)</label><input id="price" type="number" min="0" step="0.01" required></div>
+<div><label>GST</label>
+<select id="gst"><option value="0">0%</option><option value="5">5%</option><option value="12">12%</option><option value="18">18%</option><option value="28">28%</option></select></div>
+<div><label>Shop / brand</label><input id="shop" maxlength="120"></div>
+<div><label>Notes</label><input id="notes" maxlength="500"></div>
+</div>
+<p>Total including GST: <b id="preview">₹0.00</b></p>
+<button id="save" type="submit">Save Purchase</button>
+<button id="cancel" type="button" class="secondary hidden">Cancel Edit</button>
+</form>
+</div>
+
+<div class="card">
+<h3>Monthly Summary</h3>
+<div class="grid">
+<div><label>Select month</label><input id="month" type="month"></div>
+<div><label>Search item / shop</label><input id="search" placeholder="Search groceries"></div>
+</div>
+<div class="stats">
+<div>Total spent<br><b id="total">₹0.00</b></div>
+<div>Purchases<br><b id="count">0</b></div>
+<div>Unique items<br><b id="items">0</b></div>
+</div>
+<button id="refresh" class="secondary">Refresh</button>
+<button id="csv" class="secondary">Export CSV</button>
+<div id="records"></div>
+</div>
+</section>
+</main>
+
+<script>
+(() => {
+const URL = 'https://hgqwakmwdltiefplqfqo.supabase.co';
+const KEY = 'sb_publishable_0PtFprlhNciGwKaryOyf9w_EggDn9o6';
+const db = supabase.createClient(URL, KEY);
+const $ = id => document.getElementById(id);
+
+let user = null, house = null, rows = [], invite = '';
+
+const now = new Date();
+const pad = n => String(n).padStart(2, '0');
+const monthNow = now.getFullYear() + '-' + pad(now.getMonth()+1);
+$('date').value = monthNow + '-' + pad(now.getDate());
+$('month').value = monthNow;
+
+const money = n => new Intl.NumberFormat('en-IN',{
+  style:'currency',currency:'INR'
+}).format(Number(n || 0));
+
+const total = r => Number(r.price_before_gst || 0) *
+  (1 + Number(r.gst_percent || 0) / 100);
+
+const show = (id, visible) =>
+  $(id).classList.toggle('hidden', !visible);
+
+function message(s) {
+  $('notice').textContent = s;
+  show('notice', true);
+}
+
+function error(e) {
+  console.error(e);
+  message(e.message || 'Something went wrong. Please try again.');
+}
+
+async function loadState() {
+  const {data, error: e} = await db.auth.getSession();
+  if(e) return error(e);
+
+  user = data.session?.user || null;
+  house = null;
+  show('auth', !user);
+  show('setup', false);
+  show('app', false);
+
+  if(!user) return;
+
+  $('emailLabel').textContent = user.email;
+
+  const m = await db.from('grocery_household_members')
+    .select('household_id').eq('user_id', user.id).limit(1);
+
+  if(m.error) return error(m.error);
+
+  if(!m.data.length) {
+    show('setup', true);
+    return;
+  }
+
+  house = m.data[0].household_id;
+
+  const h = await db.from('grocery_households')
+    .select('name').eq('id', house).single();
+
+  if(h.error) return error(h.error);
+
+  $('houseTitle').textContent = h.data.name + ' — Shared Groceries';
+  show('app', true);
+  await loadPurchases();
+}
+
+$('signin').onclick = async () => {
+  const r = await db.auth.signInWithPassword({
+    email: $('email').value.trim(),
+    password: $('password').value
+  });
+  if(r.error) return error(r.error);
+  await loadState();
+};
+
+$('signup').onclick = async () => {
+  if($('password').value.length < 6)
+    return message('Use a password with at least 6 characters.');
+
+  const r = await db.auth.signUp({
+    email: $('email').value.trim(),
+    password: $('password').value
+  });
+
+  if(r.error) return error(r.error);
+
+  if(!r.data.session)
+    message('Check your email for a confirmation link, then sign in.');
+  else await loadState();
+};
+
+$('signout').onclick = async () => {
+  const r = await db.auth.signOut();
+  if(r.error) return error(r.error);
+  await loadState();
+};
+
+$('createHouse').onclick = async () => {
+  if(!user) return;
+  const name = $('houseName').value.trim() || 'Our Family';
+
+  const h = await db.from('grocery_households')
+    .insert({name, owner_id:user.id}).select('id').single();
+
+  if(h.error) return error(h.error);
+
+  const m = await db.from('grocery_household_members').insert({
+    household_id:h.data.id, user_id:user.id, role:'owner'
+  });
+
+  if(m.error) return error(m.error);
+  message('Household created.');
+  await loadState();
+};
+
+$('joinHouse').onclick = async () => {
+  const code = $('inviteCode').value.trim();
+  if(!code) return message('Enter the invite code first.');
+
+  const r = await db.rpc('redeem_grocery_invite', {
+    p_invite_code:code
+  });
+
+  if(r.error) return error(r.error);
+  message('You joined the household.');
+  await loadState();
+};
+
+$('invite').onclick = async () => {
+  if(!house || !user) return;
+
+  const code = crypto.randomUUID().replaceAll('-', '').slice(0,12).toUpperCase();
+
+  const r = await db.from('grocery_household_invites').insert({
+    household_id:house,
+    invite_code:code,
+    created_by:user.id
+  });
+
+  if(r.error) return error(r.error);
+
+  invite = code;
+  $('inviteText').textContent = 'Share this code with your spouse: ' + code;
+  show('copy', true);
+};
+
+$('copy').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(invite);
+    message('Invite code copied.');
+  } catch {
+    message('Your invite code is: ' + invite);
+  }
+};
+
+function updatePreview() {
+  const p = Number($('price').value || 0);
+  const g = Number($('gst').value || 0);
+  $('preview').textContent = money(p * (1 + g/100));
+}
+$('price').oninput = updatePreview;
+$('gst').onchange = updatePreview;
+
+function resetForm() {
+  $('purchaseForm').reset();
+  $('editId').value = '';
+  $('date').value = new Date().toISOString().slice(0,10);
+  $('qty').value = '1';
+  $('formTitle').textContent = 'Add Grocery Purchase';
+  $('save').textContent = 'Save Purchase';
+  show('cancel', false);
+  updatePreview();
+}
+$('cancel').onclick = resetForm;
+
+$('purchaseForm').onsubmit = async e => {
+  e.preventDefault();
+  if(!house || !user) return;
+
+  const id = $('editId').value;
+  const payload = {
+    household_id:house,
+    purchased_on:$('date').value,
+    item_name:$('item').value.trim(),
+    quantity:Number($('qty').value),
+    unit:$('unit').value,
+    price_before_gst:Number($('price').value),
+    gst_percent:Number($('gst').value),
+    shop_brand:$('shop').value.trim() || null,
+    notes:$('notes').value.trim() || null,
+    created_by:user.id
+  };
+
+  let r;
+  if(id) {
+    delete payload.created_by;
+    delete payload.household_id;
+    r = await db.from('grocery_purchases')
+      .update(payload).eq('id', id).eq('household_id',house);
+  } else {
+    r = await db.from('grocery_purchases').insert(payload);
+  }
+
+  if(r.error) return error(r.error);
+
+  message(id ? 'Purchase updated.' : 'Purchase saved.');
+  resetForm();
+  await loadPurchases();
+};
+
+async function loadPurchases() {
+  if(!house) return;
+
+  const r = await db.from('grocery_purchases')
+    .select('*').eq('household_id',house)
+    .order('purchased_on',{ascending:false})
+    .order('created_at',{ascending:false});
+
+  if(r.error) return error(r.error);
+  rows = r.data || [];
+  render();
+}
+
+function render() {
+  const month = $('month').value;
+  const q = $('search').value.toLowerCase().trim();
+
+  const filtered = rows.filter(r =>
+    (!month || r.purchased_on.startsWith(month)) &&
+    (!q || (r.item_name+' '+(r.shop_brand||'')+' '+(r.notes||''))
+      .toLowerCase().includes(q))
+  );
+
+  $('total').textContent = money(filtered.reduce((s,r)=>s+total(r),0));
+  $('count').textContent = filtered.length;
+  $('items').textContent = new Set(
+    filtered.map(r=>r.item_name.toLowerCase())
+  ).size;
+
+  const out = $('records');
+  out.replaceChildren();
+
+  if(!filtered.length) {
+    out.textContent = 'No purchases found for this month.';
+    return;
+  }
+
+  filtered.forEach(r => {
+    const div = document.createElement('div');
+    div.className = 'entry';
+
+    const title = document.createElement('b');
+    title.textContent = r.item_name;
+    div.appendChild(title);
+
+    const details = document.createElement('p');
+    details.textContent =
+      r.purchased_on + ' · ' + r.quantity + ' ' + r.unit +
+      ' · Before GST: ' + money(r.price_before_gst) +
+      ' · GST: ' + r.gst_percent + '%' +
+      ' · Total: ' + money(total(r));
+    div.appendChild(details);
+
+    if(r.shop_brand) {
+      const shop = document.createElement('p');
+      shop.textContent = 'Shop/Brand: ' + r.shop_brand;
+      div.appendChild(shop);
+    }
+
+    if(r.notes) {
+      const note = document.createElement('p');
+      note.textContent = 'Notes: ' + r.notes;
+      div.appendChild(note);
+    }
+
+    const edit = document.createElement('button');
+    edit.textContent = 'Edit';
+    edit.className = 'secondary';
+    edit.onclick = () => editPurchase(r);
+    div.appendChild(edit);
+
+    const del = document.createElement('button');
+    del.textContent = 'Delete';
+    del.className = 'danger';
+    del.onclick = async () => {
+      if(!confirm('Delete ' + r.item_name + '?')) return;
+      const d = await db.from('grocery_purchases')
+        .delete().eq('id',r.id).eq('household_id',house);
+      if(d.error) return error(d.error);
+      message('Purchase deleted.');
+      await loadPurchases();
+    };
+    div.appendChild(del);
+    out.appendChild(div);
+  });
+}
+
+function editPurchase(r) {
+  $('editId').value = r.id;
+  $('date').value = r.purchased_on;
+  $('item').value = r.item_name;
+  $('qty').value = r.quantity;
+  $('unit').value = r.unit;
+  $('price').value = r.price_before_gst;
+  $('gst').value = String(r.gst_percent);
+  $('shop').value = r.shop_brand || '';
+  $('notes').value = r.notes || '';
+  $('formTitle').textContent = 'Edit Grocery Purchase';
+  $('save').textContent = 'Update Purchase';
+  show('cancel', true);
+  updatePreview();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+$('month').onchange = render;
+$('search').oninput = render;
+$('refresh').onclick = loadPurchases;
+
+$('csv').onclick = () => {
+  const month = $('month').value;
+  const q = $('search').value.toLowerCase().trim();
+
+  const data = rows.filter(r =>
+    (!month || r.purchased_on.startsWith(month)) &&
+    (!q || (r.item_name+' '+(r.shop_brand||'')+' '+(r.notes||''))
+      .toLowerCase().includes(q))
+  );
+
+  const fields = [
+    'purchased_on','item_name','quantity','unit',
+    'price_before_gst','gst_percent','shop_brand','notes'
+  ];
+
+  const quote = v => '"' + String(v ?? '').replaceAll('"','""') + '"';
+  const csv = [
+    [...fields,'total_including_gst'].join(','),
+    ...data.map(r=>[
+      ...fields.map(k=>quote(r[k])),
+      quote(total(r).toFixed(2))
+    ].join(','))
+  ].join('\r\n');
+
+  const blob = new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'family-groceries-'+(month||'all')+'.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+db.auth.onAuthStateChange(() => {
+  setTimeout(loadState,0);
+});
+
+loadState();
+})();
+</script>
+</body>
+</html>
+
